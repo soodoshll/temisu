@@ -12,8 +12,9 @@ import numpy as np
 
 from nnsmith.narrow_spec import auto_opset
 from nnsmith.abstract.op import *
-from .render import Render
+from .render import render, Render
 from .logging import *
+from .mutator import Mutator
 
 from typing import Tuple
 
@@ -46,9 +47,8 @@ class BugReport(Exception):
         super().__init__()
 
 class Inconsistency(BugReport):
-    def __init__(self, code, annotation="", target=None, output=None):
+    def __init__(self, annotation="", target=None, output=None):
         super().__init__()
-        self.code = code
         self.target = target
         self.output = output
         self.annotation = annotation
@@ -66,25 +66,26 @@ class Inconsistency(BugReport):
             ret += f"\nOutput: {self.output}"
         return ret
     
-def verify_results(targets, outputs, render:Render):
-    _ast = render.get_last_ast()
-    _code = ast.unparse(_ast)
+def verify_results(targets, outputs, tfunc):
     if len(targets) != len(outputs):
-        raise Inconsistency(_code, f"len(targets) != len(outputs) ({len(targets)} vs {len(outputs)})")
-    for i, var in enumerate(render._model.output_map.keys()):
+        raise Inconsistency(f"len(targets) != len(outputs) ({len(targets)} vs {len(outputs)})")
+    for i, var in enumerate(tfunc._model.output_map.keys()):
         target = targets[i]
         output = outputs[i]
         if not _no_nan_or_inf(target):
             continue
         if not np.allclose(target, output):
             # logging.warning(targets)
-            raise Inconsistency(_code, f"Inconsistent result {var}", target, output)
+            raise Inconsistency(f"Inconsistent result {var}", target, output)
 
 def _no_nan_or_inf(target):
     return not np.any(np.isinf(target)) and not np.any(np.isnan(target))
 
 tot_testcases = 0
 pass_testcases = 0
+
+tot_mutate = 0
+pass_mutate = 0
 
 while True:
     gen = model_gen(
@@ -105,49 +106,55 @@ while True:
 
     input_tensors = {k:torch.tensor(v) for k,v in oracle.input.items()}
 
-    render = Render(th_model)
+    tfunc = render(th_model)
+    func = tfunc.fn()
     mlist = th_model.mlist
-    func = render.run()
+
+    mutate_cnt = 0
+
+    backend = 'inductor'
+
     try:
-        func_compiled = torch.compile(func, backend='inductor')
+        func_compiled = torch.compile(func, backend=backend)
         with torch.no_grad():
             output = func_compiled(mlist, **input_tensors)
         if not isinstance(output, tuple):
             output = (output, )
         output = [o.detach().cpu().numpy() for o in output]
-        verify_results(target, output, render)
+        verify_results(target, output, tfunc)
         pass_testcases += 1
         TEMISU_LOG.info(f"[PASS] {pass_testcases}/{tot_testcases}")
+        mutator = Mutator(tfunc, input_tensors)
+
+        tfunc = mutator._desolve_op()
+        if tfunc is None:
+            continue
+        tot_mutate += 1
+        mutate_cnt += 1
+        func = tfunc.fn()
+        func_compiled = torch.compile(func, backend=backend)
+        with torch.no_grad():
+            output = func_compiled(mlist, **input_tensors)
+        if not isinstance(output, tuple):
+            output = (output, )
+        output = [o.detach().cpu().numpy() for o in output]
+        verify_results(target, output, tfunc)
+        pass_mutate += 1
+        TEMISU_LOG.info(f"[PASS MUTATE] {pass_mutate}/{tot_mutate}")
     except Exception as e:
         TEMISU_LOG.warning(traceback.format_exc())
         
         # save report
-        bug_id = tot_testcases - pass_testcases - 1
-        report_dir = os.path.join(LOG_DIR, f"bug_{bug_id}")
+        report_dir = os.path.join(LOG_DIR, f"bug_{tot_testcases}_{mutate_cnt}")
         os.mkdir(report_dir)
         errlog_path = os.path.join(report_dir, "errlog.txt")
 
         with open(errlog_path, "w") as errlog_file:
             print(e, file=errlog_file)
         
-        code_path = os.path.join(report_dir, "code.py")
+        code_path = os.path.join(report_dir, "test.py")
         with open(code_path, "w") as code_file:
-            print(render.get_full_code(), file=code_file)
+            print(tfunc.get_full_code(), file=code_file)
 
-        mlist_path = os.path.join(report_dir, "mlist.th")
-        torch.save(render._model.mlist, mlist_path)
-
-# symbolic_trace(th_model)
-
-exit()
-
-# model.native_model.forward(input_tensors)
-
-traced_module = torch.jit.trace(model.native_model, input_tensors)
-
-code = traced_module.code
-
-print(code)
-
-# new_forward_method = compile(code, '<string>', 'exec')
-local = {}
+        mlist_path = os.path.join(report_dir, "param.th")
+        torch.save((tfunc.patched_mlist(), input_tensors), mlist_path)

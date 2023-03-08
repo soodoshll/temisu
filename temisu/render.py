@@ -10,8 +10,83 @@ from nnsmith.materialize.torch.dialect import Flatten, Linear, TorchReduceSum
 
 from .logging import RENDER_LOG
 import ast
+from collections.abc import Iterable
 
-# TORCH_REALIZABLE_OPS = FULL_OPERATOR_SETS["core"] + FULL_OPERATOR_SETS["torch"]
+class ConstFn(torch.nn.Module):
+    def __init__(self, val):
+        super().__init__()
+        self._val = val
+    
+    def forward(self):
+        return self._val
+
+class TFunction(object):
+    def __init__(self, model, stmt_list):
+        self._model = model
+        self._stmt_list = stmt_list
+    
+    def _flatten_stmt_list(self):
+        ret = []
+        for stmt in self._stmt_list:
+            if isinstance(stmt, tuple):
+                ret.extend(stmt)
+            else:
+                ret.append(stmt)
+        return ret
+
+
+    def _fn_ast(self):
+        model = self._model
+        _func_def = ast.parse(f"def forward(mlist, {','.join(model.ir.input_var())}):\n\tpass")
+
+        _ret = 'return ' + ','.join(model.output_map)
+        _func_def.body[0].body = self._flatten_stmt_list() + [ast.parse(_ret).body[0]]
+
+        # RENDER_LOG.debug(f'rendered model\n{ast.unparse(_func_def)}')
+        return _func_def
+        
+    def fn(self):
+        _func_def = self._fn_ast()
+        local_dict = {}
+        exec(compile(_func_def, "<string>", "exec"), globals(), local_dict)
+        func = local_dict['forward']
+        return func
+
+    def _mlist_comments(self):
+        ret = ""
+        for i, l in enumerate(self._model.mlist):
+            ret += f"mlist[{i}] = {l}\n"
+        return ret
+
+    def get_full_code(self, param_file="param.th"):
+        comments = '""" Module information:\n' + self._mlist_comments() + '"""\n'
+        headers = f"import torch\nmlist, inputs = torch.load('{param_file}')\n"
+        main = f"\nfn_compiled = torch.compile(forward)\nprint(fn_compiled(mlist, **inputs))\n"
+        return comments + headers + ast.unparse(self._fn_ast()) + main
+    
+    def get_stmt_list(self):
+        return self._stmt_list
+    
+    def _align_inputs(self, *args, **kwargs):
+        inputs = {}
+        if len(args) == len(self._model.input_map):
+            for i, key in enumerate(self._model.ir.input_var()):
+                inputs[key] = args[i]
+        elif len(kwargs) == len(self._model.input_map):
+            for ir_key in self._model.input_map:
+                inputs[ir_key] = kwargs[ir_key]
+        else:
+            raise ValueError("Either user args only or kwargs only")
+        return inputs
+
+    def patched_mlist(self):
+        # replace all constfn with pickable objects
+        mlist = self._model.mlist
+        for i, m in enumerate(mlist):
+            if m.__class__.__name__ == 'ConstFn':
+                val = m()
+                mlist[i] = ConstFn(val)
+        return mlist
 
 class Render(object):
     def __init__(self, model):
@@ -20,7 +95,6 @@ class Render(object):
         self._model = model
         
         self._support_op = [method[len("render"):] for method in dir(self) if method.startswith("render")]
-        
         self._ast = None
 
     def _get_render_fn(self, op):
@@ -42,52 +116,8 @@ class Render(object):
                 ret = render_fn(inst, inps, outs, op)
                 if ret is not None:
                     self._code.append(ast.parse(ret).body[0]) 
-        return self._stmt_to_func()
+        return self._code
     
-    def get_last_ast(self):
-        return self._ast
-    
-    def get_last_code(self):
-        return ast.unparse(self._ast)
-
-    def _mlist_comments(self):
-        ret = ""
-        for i, l in enumerate(self._model.mlist):
-            ret += f"mlist[{i}] = {l}\n"
-        return ret
-
-    def get_full_code(self, mlist_file="mlist.th"):
-        comments = '""" Module information:\n' + self._mlist_comments() + '"""\n'
-        headers = f"import torch\nmlist=torch.load('{mlist_file}')\n"
-        return comments + headers + self.get_last_code()
-
-    def _stmt_to_func(self):
-        model = self._model
-        _func_def = ast.parse(f"def foobar(mlist, {','.join(model.ir.input_var())}):\n\tpass")
-
-        _ret = 'return ' + ','.join(model.output_map)
-        _func_def.body[0].body = self._code + [ast.parse(_ret).body[0]]
-
-        RENDER_LOG.debug(f'rendered model\n{ast.unparse(_func_def)}')
-        self._ast = _func_def
-
-        local_dict = {}
-        exec(compile(_func_def, "<string>", "exec"), globals(), local_dict)
-        func = local_dict['foobar']
-        return func
-
-    def _align_inputs(self, *args, **kwargs):
-        inputs = {}
-        if len(args) == len(self._model.input_map):
-            for i, key in enumerate(self._model.ir.input_var()):
-                inputs[key] = args[i]
-        elif len(kwargs) == len(self._model.input_map):
-            for ir_key in self._model.input_map:
-                inputs[ir_key] = kwargs[ir_key]
-        else:
-            raise ValueError("Either user args only or kwargs only")
-        return inputs
-
     @staticmethod
     def _one_one_op(inps, outs, torch_fn):
         assert len(outs) == 1 and len(inps) == 1
@@ -224,9 +254,6 @@ class Render(object):
     def renderSoftmax(self, inst, inps, outs, op):
         return f"{outs[0]}=torch.nn.functional.softmax({inps[0]}, dim={op.dim})"
 
-    def renderNeg(self, inst, inps, outs, op):
-        return self._many_one_op(inps, outs, "torch.neg")
-
     def renderMaxPool2d(self, inst, inps, outs, op):
         return f"""{outs[0]} = torch.nn.functional.max_pool2d({inps[0]},
             kernel_size=({op.kernel_h_size}, {op.kernel_w_size}),
@@ -361,3 +388,7 @@ class Render(object):
     def renderCast(self, inst, inps, outs, op):
         return f"{outs[0]} = {inps[0]}.to(dtype={op.extra_attrs['to'].torch()})"
 
+def render(model):
+    render = Render(model)
+    stmt_list = render.run()
+    return TFunction(model, stmt_list)
