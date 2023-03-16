@@ -98,6 +98,9 @@ class MutatorInstruction(object):
     def get_inner_guard(self):
         return self._inner_guard
 
+    # def dependence(self):
+
+
 class TFunction(object):
     def __init__(self, model, inst_list=None):
         self._model = model
