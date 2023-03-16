@@ -5,7 +5,7 @@ from enum import Enum
 
 from nnsmith.abstract.op import *
 
-from .render import *
+from .ir import *
 
 ScalarizeMethod = Enum('ScalarizeMethod', ['ELEMENT', 'SHAPE', 'MAX', 'MIN', 'SUM', 'MEAN'])
 
@@ -182,9 +182,9 @@ class Mutator(object):
         return self._tfunc
 
     transforms = ["origin", 
-                  "matmul_then_inverse",
-                  "insert_tcb", 
-                  "desolve_op",
+                #   "matmul_then_inverse",
+                #   "insert_tcb", 
+                #   "desolve_op",
                   ]
 
     def __iter__(self):

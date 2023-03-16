@@ -12,7 +12,7 @@ import numpy as np
 
 from nnsmith.narrow_spec import auto_opset
 from nnsmith.abstract.op import *
-from .render import Render, TFunction
+from .ir import TFunction
 from .logging import *
 from .mutator import Mutator
 

@@ -35,6 +35,7 @@ Inserting true conditions
 
 ## Data Movement
  * Offloading
+ * Gradient Checkpointing
 
 ## Functionalize
  * Choose some instructions to form a new (sub)function
