@@ -11,31 +11,33 @@ ScalarizeMethod = Enum('ScalarizeMethod', ['ELEMENT', 'SHAPE', 'MAX', 'MIN', 'SU
 
 def _scalarize(k:str, v:torch.Tensor):
     if len(v.shape) == 0:
-        return k, v
+        return Variable(k), v
     p = random.choice(list(ScalarizeMethod))
+    # p = ScalarizeMethod.ELEMENT
     if p == ScalarizeMethod.SHAPE:
         dim = random.randint(0, len(v.shape) - 1)
-        k = k + f".shape[{dim}]"
+        k = Variable(k, suffix=f".shape[{dim}]")
         v = v.shape[dim]
     elif p == ScalarizeMethod.ELEMENT:
         dim = Mutator._choose_pos(v)
-        k = f"{k}[{','.join(map(str, dim))}]" 
+        k = Variable(k, idx=list(map(str, dim)))
         v = v[dim]
     elif p == ScalarizeMethod.MIN:
-        k  = f"{k}.min()"
+        k  = Variable(k, suffix=".min()")
         v = v.min()
     elif p == ScalarizeMethod.MAX:
-        k = f"{k}.max()"
+        k  = Variable(k, suffix=".max()")
         v = v.max()
     elif p == ScalarizeMethod.SUM:
-        k = f"{k}.sum()"
+        k  = Variable(k, suffix=".sum()")
         v = v.sum()
     elif p == ScalarizeMethod.MEAN:
         if not torch.is_floating_point(v):
-            k = f"{k}.float()"
-            v = v.float()
-        k = f"{k}.mean()"
-        v = v.mean()
+            k = Variable(k, suffix=".float().mean()")
+            v = v.float().mean()
+        else:
+            k = Variable(k, suffix=".mean()")
+            v = v.mean()
 
     return k, v
 
@@ -46,16 +48,18 @@ def _generate_true_condition(tensor_map):
     k2, v2 = _scalarize(k2, v2)
     
     op = '<' if v1 < v2 else '>='
-    expr = f"{k1} {op} {k2}"
+    print(v1, v2, op)
+    expr = BinaryCompExpr(k1, k2, op) 
     return expr
 
 class Mutator(object):
     def __init__(self, tfunc, inputs):
-        self._tfunc:TFunction = tfunc
+        self._tfunc : TFunction = tfunc
+        self._model = tfunc._model
         self._inputs = inputs
         self._mlist = tfunc._model.mlist
 
-        self._stmt_list = tfunc.get_inst_list()
+        self._inst_list : List[Instruction] = tfunc.get_inst_list()
         self._cached_profile = None
     
     def _init_locals(self):
@@ -67,27 +71,30 @@ class Mutator(object):
 
         return local_dict
 
+    def _clean_cache(self):
+        self._cached_profile = None
+
     # Be cautious about cache!
     def profile(self):
         if self._cached_profile is not None:
             return self._cached_profile
         local_dict = self._init_locals()
-        tensor_table = []
-        render = Render(self._tfunc._model, self._stmt_list)
-        for stmt in self._stmt_list:
-            var = stmt.get()[2][0]
-            rendered = render._render_single_inst(stmt)
-            exec(rendered,  globals(), local_dict)
-            tensor_table.append((var, local_dict[var]))
-        self._cached_profile = tensor_table
-        return tensor_table
+        snapshots = []
+        for stmt in self._inst_list:
+            saved_snapshot = {k : v.detach().clone() for k, v in local_dict.items() if isinstance(v, torch.Tensor)}
+            snapshots.append(saved_snapshot)
+            module = ast.Module([stmt.to_ast()], [], lineno=0, col_offset=0)
+            ast.fix_missing_locations(module)
+            exec(compile(module, "<string>", "exec"), globals(), local_dict)
+        # self._cached_profile = snapshots
+        return snapshots
 
     def insert_tcb(self):
-        n_stmts = len(self._stmt_list)
+        n_stmts = len(self._inst_list)
         start = random.randint(0, n_stmts - 1)
-        tensor_table = self.profile()[:start]
+        tensor_table = self.profile()[start]
 
-        available_tensors = {k : v for k, v in tensor_table}
+        available_tensors = tensor_table.copy() 
         for k, v in self._inputs.items():
             available_tensors[k] = v
 
@@ -95,17 +102,24 @@ class Mutator(object):
             return self._tfunc
 
         cond = _generate_true_condition(available_tensors)
-        
         end = random.randint(start + 1, n_stmts)
-        g = Guard(cond, self._stmt_list[start])
-        for inst in self._stmt_list[start:end]:
-            inst.set_guard(g)
+
+        if_inst = IfInstruction(cond, self._inst_list[start:end], )
+        del self._inst_list[start:end]
+        self._inst_list.insert(start, if_inst)
+
+        if self._cached_profile is not None:
+            del self._cached_profile[start + 1:end]
+        # self._clean_cache()
+        # g = Guard(cond, self._stmt_list[start])
+        # for inst in self._stmt_list[start:end]:
+        #     inst.set_guard(g)
 
         return self._tfunc
         
     @staticmethod
     def _choose_pos(t):
-        return tuple([random.randint(0, d - 1) for d  in t.shape])
+        return tuple([random.randint(0, d - 1) for d in t.shape])
     
     def desolve_op(self):
         profile = self.profile()
@@ -133,7 +147,7 @@ class Mutator(object):
         return self._tfunc
 
     def _insert_input_to_profile(self, profile):
-        tensor_map = {k : v for k, v in profile}
+        tensor_map = profile.copy()
         for k, v in self._inputs.items():
             tensor_map[k] = v        
         return tensor_map
@@ -141,30 +155,30 @@ class Mutator(object):
     def matmul_then_inverse(self):
         profile = self.profile()
         candidates = []
-        for i, (_, v) in enumerate(profile):
-            if v.dtype in [torch.float32, torch.float64] and len(v.shape) > 0:
-                candidates.append(i)
+        for i, snapshot in enumerate(profile):
+            for var, val in snapshot.items():
+                if val.dtype in [torch.float32, torch.float64] and len(val.shape) >= 2:
+                    candidates.append((i, var, val))
         
         if len(candidates) == 0:
             return self._tfunc
         
-        chosen = random.choice(candidates)
-        var, val = profile[chosen]
+        inst_no, var, val = random.choice(candidates)
         dim = val.shape[-1]
 
-        inst_list = self._stmt_list 
+        inst_list = self._inst_list 
 
         a = torch.rand([dim, dim], dtype=val.dtype, device=val.device)
         a_module = ConstFn(a)
         self._mlist.append(a_module)
-        init_stmt = MutatorInstruction(a_module, [], ['tmp'], Constant(a.shape))
-        inst_list.insert(chosen + 1, init_stmt)
-        matmul_stmt = MutatorInstruction(torch.matmul, [var, 'tmp'], [var], MatMul())
-        inst_list.insert(chosen + 2, matmul_stmt)
+        init_stmt = CoreInstruction(self._model, a_module, [], ['tmp'], Constant(a.shape))
+        inst_list.insert(inst_no + 1, init_stmt)
+        matmul_stmt = CoreInstruction(self._model, torch.matmul, [var, 'tmp'], [var], MatMul())
+        inst_list.insert(inst_no + 2, matmul_stmt)
 
         dep = None
-        for i in range(chosen + 3, len(inst_list)):
-            if var in inst_list[i]._inps:
+        for i in range(inst_no + 3, len(inst_list)):
+            if var in inst_list[i].inputs():
                 dep = i
                 break
         if var in self._tfunc._model.output_map:
@@ -173,17 +187,17 @@ class Mutator(object):
             a_inv = torch.inverse(a)
             a_inv_module = ConstFn(a_inv)
             self._mlist.append(a_inv_module)
-            inv_init_stmt = MutatorInstruction(a_inv_module, [], ['tmp_inv'], Constant(a.shape))
-            inv_stmt = MutatorInstruction(torch.matmul, [var, 'tmp_inv'], [var], MatMul())
+            inv_init_stmt = CoreInstruction(self._model, a_inv_module, [], ['tmp_inv'], Constant(a.shape))
+            inv_stmt = CoreInstruction(self._model, torch.matmul, [var, 'tmp_inv'], [var], MatMul())
             inst_list.insert(dep, inv_init_stmt)
             inst_list.insert(dep + 1, inv_stmt)
 
-        self._cached_profile = None
+        self._clean_cache()
         return self._tfunc
 
     transforms = ["origin", 
-                #   "matmul_then_inverse",
-                #   "insert_tcb", 
+                  "matmul_then_inverse",
+                  "insert_tcb", 
                 #   "desolve_op",
                   ]
 

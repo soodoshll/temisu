@@ -32,7 +32,8 @@ class TFunction(object):
         inst_list = [inst.to_ast() for inst in self._inst_list]
 
         _func_def.body[0].body = inst_list + [ast.parse(_ret).body[0]]
-
+        _func_def = ast.fix_missing_locations(_func_def)
+        # print(ast.dump(_func_def, include_attributes=True, indent=4))
         return _func_def
         
     def fn(self):
@@ -104,26 +105,29 @@ class Variable(object):
         ret = self._name
         if self._idx is not None:
             ret += f"[{','.join(self._idx)}]"
-        if self.suffix is not None:
+        if self._suffix is not None:
             ret += self._suffix
         return ret
+    
+    def name(self):
+        return self._name
 
 class CoreInstruction(Instruction):
     def __init__(self, model, inst, inps, outs, op):
         super().__init__()
         self._model = model
         self._inst = inst
-        self._inps = inps
-        self._outs = outs
+        self._inps = [Variable(var) if isinstance(var, str) else var for var in inps]
+        self._outs = [Variable(var) if isinstance(var, str) else var for var in outs]
         self._op = op
 
         self._support_op = [method[len("render"):] for method in dir(self) if method.startswith("render")]
     
     def inputs(self):
-        return self._inps
+        return set([var.name() for var in self._inps])
     
     def outputs(self):
-        return self._outs
+        return set([var.name() for var in self._outs])
 
     def _get_render_fn(self, op):
         for support_op in self._support_op:
@@ -143,12 +147,12 @@ class CoreInstruction(Instruction):
     @staticmethod
     def _one_one_op(inps, outs, torch_fn):
         assert len(outs) == 1 and len(inps) == 1
-        return f"{outs[0]}={torch_fn}({','.join(inps)})"
+        return f"{outs[0]}={torch_fn}({','.join(map(str, inps))})"
 
     @staticmethod
     def _many_one_op(inps, outs, torch_fn):
         assert len(outs) == 1
-        return f"{outs[0]}={torch_fn}({','.join(inps)})"
+        return f"{outs[0]}={torch_fn}({','.join(map(str, inps))})"
 
     def _index_module(self, torch_module):
         for i, l in enumerate(self._model.mlist):
@@ -159,7 +163,7 @@ class CoreInstruction(Instruction):
     def _index_module_and_call(self, inst, inps, outs, op):
         assert len(inps) == 1
         module_id = self._index_module(inst)
-        return f"{outs[0]}=mlist[{module_id}]({','.join(inps)})"
+        return f"{outs[0]}=mlist[{module_id}]({','.join(map(str, inps))})"
     
     def renderConstant(self, inst, inps, outs, op):
         module = self._index_module(inst)
@@ -170,7 +174,7 @@ class CoreInstruction(Instruction):
    
     def renderAdd(self, inst, inps, outs, op):
         assert len(outs) == 1
-        return f"{outs[0]}=torch.add({','.join(inps)})"
+        return self._many_one_op(inps, outs, 'torch.add')
 
     def renderGELU(self, inst, inps, outs, op):
         return self._one_one_op(inps, outs, "torch.nn.functional.gelu")
@@ -181,7 +185,7 @@ class CoreInstruction(Instruction):
     def renderPReLU(self, inst, inps, outs, op):
         assert len(inps) == 1
         module_id = self._index_module(inst)
-        return f"{outs[0]}=mlist[{module_id}]({','.join(inps)})"
+        return f"{outs[0]}=mlist[{module_id}]({','.join(map(str, inps))})"
 
     def renderSigmoid(self, inst, inps, outs, op):
         return self._one_one_op(inps, outs, "torch.sigmoid")
@@ -421,13 +425,28 @@ class BinaryCompExpr(object):
         return f"{self._a} {self._op} {self._b}"
     
     def to_ast(self):
-        return ast.parse(str(self), mode='eval')
+        return ast.parse(str(self), mode='eval').body
+
+    def inputs(self):
+        return set(self._a.name(), self._b.name())
 
 class IfInstruction(Instruction):
     def __init__(self, cond:BinaryCompExpr, then:List[Instruction]=[], els:List[Instruction]=[]):
-        self.__init__()
+        super().__init__()
         self._cond = cond
         self._then = then
         self._els = els
+
+    def to_ast(self):
+        then = [inst.to_ast() for inst in self._then]
+        els = [inst.to_ast() for inst in self._els]
+        cond = self._cond.to_ast()
+        if_stmt = ast.If(cond, then, els)
+        if_stmt = ast.fix_missing_locations(if_stmt)
+        return if_stmt
     
-    def __str__(self):
+    def outputs(self):
+        return set([inst.outputs() for inst in self._then + self._els])
+
+    def inputs(self):
+        return set([inst.inputs() for inst in self._then + self._els] + self._cond.inputs())

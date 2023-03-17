@@ -123,7 +123,7 @@ while True:
         opset=opset,
         max_elem_per_tensor=65536,
         timeout_ms=10000,
-        max_nodes=10,
+        max_nodes=5,
         dtype_choices=['bool', 'f32', 'int32', 'int64', 'f64', ],
     )
     ir = gen.make_concrete()
@@ -144,26 +144,26 @@ while True:
     # backend = relax_dynamo() 
     backend = "inductor"
 
-    try:
-        # mutation_name = "origin"
-        # output = _compile_and_run(func, input_tensors) 
-        # verify_results(target, output, tfunc)
-        for mutation_name, tfunc in Mutator(tfunc, input_tensors):
-            TEMISU_LOG.info(f"mutate: {mutation_name}")
-            if tfunc is None:
-                continue
-            func = tfunc.fn()
-            _save_report(tfunc=tfunc)
-            output = _compile_and_run(func, input_tensors, backend=backend)
-            verify_results(target, output, tfunc, 1e-2, 1e-4)
-            TEMISU_LOG.info(f"pass: {mutation_name}")
-        pass_testcases += 1
-        TEMISU_LOG.info(f"[PASS] {pass_testcases}/{tot_testcases}")
-    except Exception as e:
-        TEMISU_LOG.warning(traceback.format_exc())
+    # try:
+    #     # mutation_name = "origin"
+    #     # output = _compile_and_run(func, input_tensors) 
+    #     # verify_results(target, output, tfunc)
+    #     for mutation_name, tfunc in Mutator(tfunc, input_tensors):
+    #         TEMISU_LOG.info(f"mutate: {mutation_name}")
+    #         if tfunc is None:
+    #             continue
+    #         func = tfunc.fn()
+    #         _save_report(tfunc=tfunc)
+    #         output = _compile_and_run(func, input_tensors, backend=backend)
+    #         verify_results(target, output, tfunc, 1e-2, 1e-4)
+    #         TEMISU_LOG.info(f"pass: {mutation_name}")
+    #     pass_testcases += 1
+    #     TEMISU_LOG.info(f"[PASS] {pass_testcases}/{tot_testcases}")
+    # except Exception as e:
+    #     TEMISU_LOG.warning(traceback.format_exc())
         
-        # save report
-        report_dir = os.path.join(LOG_DIR, f"bug_{tot_testcases}_{mutation_name}")
-        _save_report(report_dir, tfunc, e)
+    #     # save report
+    #     report_dir = os.path.join(LOG_DIR, f"bug_{tot_testcases}_{mutation_name}")
+    #     _save_report(report_dir, tfunc, e)
 
-        TEMISU_LOG.info("failure report generated")
+    #     TEMISU_LOG.info("failure report generated")
