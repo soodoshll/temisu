@@ -41,7 +41,7 @@ opset = op_filter(
              #"core.ReduceMax", "core.ReduceMin", "core.Abs", "core.Pad", "core.Atan", "core.ReduceMean", "core.Div"
              "core.Concat1", "core.Concat2", "core.Concat3", "core.Concat4", "core.Concat5", "core.Concat6",
              "core.Floor", "core.Round", "core.Ceil",
-             "core.Expand"
+             "core.ExpandLast1", "core.ExpandLast2", "core.ExpandLast3", "core.ExpandLast4",
             ]
         )
 
