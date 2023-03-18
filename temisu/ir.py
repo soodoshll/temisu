@@ -8,7 +8,7 @@ from nnsmith.materialize import framework_operator_impl
 from nnsmith.materialize.torch.dialect import Flatten, Linear, TorchReduceSum
 from .logging import RENDER_LOG
 
-class ConstFn(torch.nn.Module):
+class TConstFn(torch.nn.Module):
     def __init__(self, val):
         super().__init__()
         self._val = val
@@ -52,7 +52,7 @@ class TFunction(object):
     def get_full_code(self, param_file="param.th"):
         comments = '""" Module information:\n' + self._mlist_comments() + '"""\n'
         headers = f"import torch\nmlist, inputs = torch.load('{param_file}')\n"
-        main = f"\nfn_compiled = torch.compile(forward)\nprint(fn_compiled(mlist, **inputs))\n"
+        main = f"\nwith torch.no_grad():\n\tprint(forward(mlist, **inputs))\n\tfn_compiled = torch.compile(forward)\n\tprint(fn_compiled(mlist, **inputs))\n"
         return comments + headers + ast.unparse(self._fn_ast()) + main
     
     def get_inst_list(self):
@@ -76,7 +76,7 @@ class TFunction(object):
         for m in self._model.mlist:
             if m.__class__.__name__ == 'ConstFn':
                 val = m()
-                new_mlist.append(ConstFn(val))
+                new_mlist.append(TConstFn(val))
             else:
                 new_mlist.append(m)
         return new_mlist
@@ -450,3 +450,22 @@ class IfInstruction(Instruction):
 
     def inputs(self):
         return set([inst.inputs() for inst in self._then + self._els] + self._cond.inputs())
+
+class SimpleAssignInstruction(Instruction):
+    def __init__(self, var:Variable, rhs:Union[str, Variable], clone=True):
+        super().__init__()
+        self._var = var
+        self._rhs = rhs
+        self._clone = clone
+    
+    def inputs(self):
+        return set() if isinstance(self._rhs, str) else set([rhs.name()])
+
+    def outputs(self):
+        return set([var.name()])
+    
+    def to_ast(self):
+        rhs = self._rhs
+        if isinstance(rhs, Variable) and self._clone:
+            rhs = f"({rhs}).clone()"
+        return ast.parse(f"{self._var}={rhs}").body[0]
