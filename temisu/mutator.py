@@ -110,8 +110,10 @@ class Mutator(object):
         candidates = []
         for idx, inst in enumerate(self._inst_list):
             if isinstance(inst, CoreInstruction):
-                if isinstance(inst._op, ElementWiseUnaryOp):
+                if isinstance(inst._op, ELEMENTWISE_OP):
                     candidates.append(idx) 
+        if len(candidates) == 0:
+            return self._tfunc
         chosen = random.choice(candidates)
         inst = self._inst_list[chosen]
 
@@ -120,6 +122,10 @@ class Mutator(object):
 
         if len(out.shape) == 0:
             return self._tfunc
+        for inp in inst._inps:
+            if snapshot[inp.name()].shape != out.shape:
+                return self._tfunc
+
 
         dim = random.randint(0, len(out.shape) - 1)
         init = InitInstruction(inst._outs[0].name(), out.shape, out.dtype, out.device)
@@ -210,7 +216,7 @@ class Mutator(object):
 
         var_element = Variable(var, list(map(str, pos)))
 
-        backup_inst = SimpleAssignInstruction("backup", var_element)
+        backup_inst = SimpleAssignInstruction(Variable("backup"), var_element)
         modify_inst = SimpleAssignInstruction(var_element, str(torch.rand([]).to(val.dtype).numpy()))
         recover_inst = SimpleAssignInstruction(var_element, "backup")
 
@@ -231,11 +237,42 @@ class Mutator(object):
         
         return self._tfunc
 
+    def subfunction(self):
+        n_inst = len(self._inst_list)
+        start = random.randint(0, n_inst - 1)
+        end = random.randint(start + 1, n_inst)
+        
+        inst_list = self._inst_list[start : end].copy()
+
+        snapshot = self.profile(start)
+
+        args = set()
+        rets = set()
+        defined = set()
+        for inst in inst_list:
+            args.update([inp for inp in inst.inputs() if not inp in defined])
+            rets.update(inst.outputs())
+            if isinstance(inst, (CoreInstruction, InitInstruction)):
+                defined.update(inst.outputs())
+        args = [arg for arg in args if arg in snapshot and random.choice([True,False])]
+        
+        args, rets = list(args), list(rets)
+        
+        funcdef = SubFunctionDef("subfunc", args, rets, inst_list)
+        call = CallSubFunction("subfunc", args, rets)
+
+        del self._inst_list[start:end]
+        self._inst_list.insert(start, call)
+        self._inst_list.insert(start, funcdef)
+
+        return self._tfunc
+
     transforms = ["origin", 
                   # "matmul_then_inverse",
                   "modify_then_recover",
                   "desolve_op",
                   "insert_tcb", 
+                  "subfunction"
                   ]
 
     def __iter__(self):
@@ -251,8 +288,8 @@ class Mutator(object):
         self._ptr += 1
         return transform, tfunc
 
-ELEMENTWISE_OP = [
+ELEMENTWISE_OP = (
     ReLU, Add, GELU, LeakyReLU, Sigmoid, Sin, Cos, Asin, Acos, Tan, Atan,
     Abs, Mul, Div, Max, Min, Equal, Greater, Less, And, Or, Xor, Pow, Floor,
     Ceil, Clip, Round, Sqrt, Log2, Neg
-]
+)
