@@ -40,13 +40,11 @@ class TFunction(object):
 
         _func_def.body[0].body = inst_list + [ast.parse(_ret).body[0]]
         _func_def = ast.fix_missing_locations(_func_def)
-        # print(ast.dump(_func_def, include_attributes=True, indent=4))
         return _func_def
         
     def fn(self):
         _func_def = self._fn_ast()
         local_dict = {}
-        # print(ast.unparse(_func_def))
         exec(compile(_func_def, "<string>", "exec"), globals(), local_dict)
         func = local_dict['forward']
         return func
