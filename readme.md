@@ -34,6 +34,7 @@ Inserting true conditions
  * Backup, modify then recover
 
 ## Data Movement
+ * Inplace Operator
  * Offloading
  * Gradient Checkpointing
 

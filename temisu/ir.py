@@ -434,7 +434,7 @@ class BinaryCompExpr(object):
         return ast.parse(str(self), mode='eval').body
 
     def inputs(self):
-        return set(self._a.name(), self._b.name())
+        return set([self._a.name(), self._b.name()])
 
 class IfInstruction(Instruction):
     def __init__(self, cond:BinaryCompExpr, then:List[Instruction]=[], els:List[Instruction]=[]):
@@ -449,14 +449,19 @@ class IfInstruction(Instruction):
         cond = self._cond.to_ast()
         if_stmt = ast.If(cond, then, els)
         if_stmt = ast.fix_missing_locations(if_stmt)
-        # print(ast.unparse(if_stmt))
         return if_stmt
     
     def outputs(self):
-        return set([inst.outputs() for inst in self._then + self._els])
+        ret = set()
+        for inst in self._then + self._els:
+            ret.update(inst.outputs())
+        return ret
 
     def inputs(self):
-        return set([inst.inputs() for inst in self._then + self._els] + self._cond.inputs())
+        ret = set(self._cond.inputs())
+        for inst in self._then + self._els:
+            ret.update(inst.inputs())
+        return ret
 
 class SimpleAssignInstruction(Instruction):
     def __init__(self, var:Variable, rhs:Union[str, Variable], clone=True):
@@ -484,11 +489,14 @@ class InitInstruction(Instruction):
         self._dtype = dtype
         self._device = device
 
+    def inputs(self):
+        return set()
+
     def outputs(self):
-        return set([Variable(self._out)])
+        return set([self._out])
 
     def get_init_expr(self):
-        return f"{self._out} = torch.empty({self._shape}, dtype={self._dtype}, device='{self._device}')"
+        return f"{self._out} = torch.zeros({self._shape}, dtype={self._dtype}, device='{self._device}')"
     
     def to_ast(self):
         init_ast = ast.parse(self.get_init_expr()).body[0]
@@ -512,10 +520,10 @@ class ElementwiseLoop(Instruction):
         self._inst = CoreInstruction(inst._model, inst._inst, new_inps, [new_out], inst._op)
     
     def inputs(self):
-        return self.inputs()
+        return self._inst.inputs()
     
     def outputs(self):
-        return self.outputs()
+        return self._inst.outputs()
     
     def get_index_list(self):
         ret = [':'] * self._ndim
@@ -530,3 +538,41 @@ class ElementwiseLoop(Instruction):
         body_ast = self._inst.to_ast()
         loop_ast.body[0] = body_ast
         return loop_ast
+
+class SubFunctionDef(Instruction):
+    def __init__(self, name, args, rets, inst_list):
+        self._name = name
+        self._args = args
+        self._rets = rets
+        self._inst_list = inst_list
+        super().__init__()
+   
+    def inputs(self):
+        return set() # might be updated
+    
+    def outputs(self):
+        return set() # might be updated
+    
+    def to_ast(self):
+        def_inst = f"def {self._name}({','.join(map(str, self._args))}):\n\treturn {','.join(map(str, self._rets))}"
+        def_inst = ast.parse(def_inst).body[0]
+        def_inst.body = [inst.to_ast() for inst in self._inst_list] + def_inst.body
+        # print(ast.unparse(def_inst))
+        return def_inst
+
+
+class CallSubFunction(Instruction):
+    def __init__(self, name, args, rets):
+        self._name = name
+        self._args = args
+        self._rets = rets
+    
+    def inputs(self):
+        return set(self._args)
+
+    def outputs(self):
+        return set(self._rets)
+
+    def to_ast(self):
+        inst = f"{','.join(map(str, self._rets))} = {self._name}({','.join(map(str, self._args))})"
+        return ast.parse(inst).body[0]
