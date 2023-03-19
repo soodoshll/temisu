@@ -1,6 +1,7 @@
 import ast
 
 import torch
+from collections.abc import Iterable
 
 from nnsmith.abstract.dtype import DTYPE_GEN_INTS
 from nnsmith.abstract.op import *
@@ -29,7 +30,13 @@ class TFunction(object):
         _func_def = ast.parse(f"def forward(mlist, {','.join(model.ir.input_var())}):\n\tpass")
         _ret = 'return ' + ','.join(model.output_map)
 
-        inst_list = [inst.to_ast() for inst in self._inst_list]
+        inst_list = []
+        for inst in self._inst_list:
+            ret = inst.to_ast()
+            if isinstance(ret, Iterable):
+                inst_list.extend(ret)
+            else:
+                inst_list.append(ret)
 
         _func_def.body[0].body = inst_list + [ast.parse(_ret).body[0]]
         _func_def = ast.fix_missing_locations(_func_def)
@@ -39,6 +46,7 @@ class TFunction(object):
     def fn(self):
         _func_def = self._fn_ast()
         local_dict = {}
+        # print(ast.unparse(_func_def))
         exec(compile(_func_def, "<string>", "exec"), globals(), local_dict)
         func = local_dict['forward']
         return func
@@ -443,6 +451,7 @@ class IfInstruction(Instruction):
         cond = self._cond.to_ast()
         if_stmt = ast.If(cond, then, els)
         if_stmt = ast.fix_missing_locations(if_stmt)
+        # print(ast.unparse(if_stmt))
         return if_stmt
     
     def outputs(self):
@@ -459,13 +468,67 @@ class SimpleAssignInstruction(Instruction):
         self._clone = clone
     
     def inputs(self):
-        return set() if isinstance(self._rhs, str) else set([rhs.name()])
+        return set() if isinstance(self._rhs, str) else set([self._rhs.name()])
 
     def outputs(self):
-        return set([var.name()])
+        return set([self._var.name()])
     
     def to_ast(self):
         rhs = self._rhs
         if isinstance(rhs, Variable) and self._clone:
             rhs = f"({rhs}).clone()"
         return ast.parse(f"{self._var}={rhs}").body[0]
+
+class InitInstruction(Instruction):
+    def __init__(self, out, shape, dtype, device):
+        self._out = out
+        self._shape = shape
+        self._dtype = dtype
+        self._device = device
+
+    def outputs(self):
+        return set([Variable(self._out)])
+
+    def get_init_expr(self):
+        return f"{self._out} = torch.empty({self._shape}, dtype={self._dtype}, device='{self._device}')"
+    
+    def to_ast(self):
+        init_ast = ast.parse(self.get_init_expr()).body[0]
+        return init_ast
+
+class ElementwiseLoop(Instruction):
+    def __init__(self, inst, dim, shape):
+        super().__init__()
+        self._dim = dim
+        self._shape = shape
+        self._ndim = len(shape)
+
+        self._out = inst._outs[0].name()
+
+        self._idx = 'i'
+        idx = self.get_index_list()
+
+        assert isinstance(inst, CoreInstruction)
+        new_out = Variable(str(inst._outs[0]), idx)
+        new_inps = [Variable(str(inp), idx) for inp in inst._inps]
+        self._inst = CoreInstruction(inst._model, inst._inst, new_inps, [new_out], inst._op)
+    
+    def inputs(self):
+        return self.inputs()
+    
+    def outputs(self):
+        return self.outputs()
+    
+    def get_index_list(self):
+        ret = [':'] * self._ndim
+        ret[self._dim] = self._idx
+        return ret
+    
+    def get_loop(self):
+        return f"for {self._idx} in range(0, {self._shape[self._dim]}):"
+
+    def to_ast(self):
+        loop_ast = ast.parse(self.get_loop() + '\n\tpass').body[0]
+        body_ast = self._inst.to_ast()
+        loop_ast.body[0] = body_ast
+        return loop_ast

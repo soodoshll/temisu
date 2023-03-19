@@ -107,25 +107,26 @@ class Mutator(object):
         return tuple([random.randint(0, d - 1) for d in t.shape])
     
     def desolve_op(self):
-        profile = self.profile()
-        tensor_map = {k : v for k, v in profile}
-        for k, v in self._inputs.items():
-            tensor_map[k] = v
-    
-        desolver = OpDesolver(self._tfunc, tensor_map)
-        chosen = desolver.run()
+        candidates = []
+        for idx, inst in enumerate(self._inst_list):
+            if isinstance(inst, CoreInstruction):
+                if isinstance(inst._op, ElementWiseUnaryOp):
+                    candidates.append(idx) 
+        chosen = random.choice(candidates)
+        inst = self._inst_list[chosen]
 
-        # inner_guard
-        if chosen is not None:
-            profile = profile[:chosen] 
-            tensor_map = {k : v for k, v in profile}
-            for k, v in self._inputs.items():
-                tensor_map[k] = v
-            if len(tensor_map) >= 2:
-                cond = _generate_true_condition(tensor_map)
-                g = Guard(cond, self._stmt_list[chosen])
-                self._stmt_list[chosen].set_inner_guard(g)
+        snapshot = self.profile(chosen + 1)
+        out = snapshot[inst._outs[0].name()]
 
+        if len(out.shape) == 0:
+            return self._tfunc
+
+        dim = random.randint(0, len(out.shape) - 1)
+        init = InitInstruction(inst._outs[0].name(), out.shape, out.dtype, out.device)
+        loop = ElementwiseLoop(inst, dim, out.shape)
+
+        self._inst_list[chosen] = loop
+        self._inst_list.insert(chosen, init)
         return self._tfunc
 
     def origin(self):
@@ -194,7 +195,7 @@ class Mutator(object):
 
         for k, v in snapshot.items():
             if k in candidates and v.untyped_storage().data_ptr() in data_ptr:
-                print("remove const fn")
+                # print("remove const fn")
                 del candidates[k]
         if len(candidates) == 0:
             return self._tfunc
@@ -233,8 +234,8 @@ class Mutator(object):
     transforms = ["origin", 
                   # "matmul_then_inverse",
                   "modify_then_recover",
+                  "desolve_op",
                   "insert_tcb", 
-                  #  "desolve_op",
                   ]
 
     def __iter__(self):

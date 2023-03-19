@@ -69,8 +69,6 @@ class Inconsistency(BugReport):
 
     def __str__(self):
         ret = self.annotation
-        # ret += "\nCode:\n"
-        # ret += self.code
         if self.target is not None:
             ret += f"\nExpected: {self.target}"
         if self.output is not None:
