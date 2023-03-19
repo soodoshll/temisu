@@ -1,21 +1,15 @@
-from functools import partial
-from typing import Type
+import ast
 
 import torch
-import nnsmith
+from collections.abc import Iterable
+
 from nnsmith.abstract.dtype import DTYPE_GEN_INTS
 from nnsmith.abstract.op import *
 from nnsmith.materialize import framework_operator_impl
 from nnsmith.materialize.torch.dialect import Flatten, Linear, TorchReduceSum
-
 from .logging import RENDER_LOG
-import ast
-from collections.abc import Iterable
-from enum import Enum
 
-DissolveType = Enum('DissolveType', ['ELEMENTWISE'])
-
-class ConstFn(torch.nn.Module):
+class TConstFn(torch.nn.Module):
     def __init__(self, val):
         super().__init__()
         self._val = val
@@ -23,104 +17,29 @@ class ConstFn(torch.nn.Module):
     def forward(self):
         return self._val
 
-class Guard(object):
-    def __init__(self, expr, first_inst=None):
-        self._expr = expr
-        self._first_inst = first_inst 
-    
-    def get_first_inst(self):
-        return self._first_inst
-
-    def get(self):
-        return self._expr
-
-class SpatialLoop(object):
-    def __init__(self, idx, dim, shape, dtype, device='cuda'):
-        self._idx = idx
-        self._dim = dim
-        self._shape = shape
-        self._ndim = len(shape)
-        self._dtype = dtype
-        self._device = device
-    
-    def get_index_str(self):
-        ret = [':'] * self._ndim
-        ret[self._dim] = self._idx
-        return '[' + ','.join(ret) + ']'
-    
-    def get_init_expr(self):
-        return f"torch.empty({self._shape}, dtype={self._dtype}, device='{self._device}')"
-    
-    def get_loop(self):
-        return f"for {self._idx} in range(0, {self._shape[self._dim]}):"
-
-# class MatMulLoop(object):
-#     def __init__(self, shape_prefix, m, k, dtype, device='cuda'):
-#         self._shape_prefix = 
-#         self._m = m
-#         self._k = k
-#         self._dtype = dtype
-#         self._device = device
-
-#     def get_init_expr(self):
-#         return f"torch.zero({shape_prefix + []})"
-
-
-class MutatorInstruction(object):
-    def __init__(self, inst, inps, outs, op, guard=None, inner_guard=None):
-        self._inst = inst
-        self._inps = inps
-        self._outs = outs
-        self._op = op
-        self._guard = guard
-        self._inner_guard = inner_guard
-
-        self._dissolve = None
-    
-    def get(self):
-        return self._inst, self._inps, self._outs, self._op
-    
-    def set_guard(self, guard):
-        self._guard = guard
-    
-    def get_guard(self):
-        return self._guard
-    
-    def set_dissolve(self, dissolve_type):
-        self._dissolve = dissolve_type
-
-    def get_dissolve(self):
-        return self._dissolve
-    
-    def set_inner_guard(self, guard):
-        self._inner_guard = guard
-
-    def get_inner_guard(self):
-        return self._inner_guard
-
-    # def dependence(self):
-
-
 class TFunction(object):
     def __init__(self, model, inst_list=None):
         self._model = model
         if inst_list is None:
-            self._inst_list = [MutatorInstruction(*inst) for inst in model.instructions]
+            self._inst_list = [CoreInstruction(model, *inst) for inst in model.instructions]
         else:
             self._inst_list = inst_list
     
     def _fn_ast(self):
         model = self._model
         _func_def = ast.parse(f"def forward(mlist, {','.join(model.ir.input_var())}):\n\tpass")
-
         _ret = 'return ' + ','.join(model.output_map)
 
-        render = Render(model, self._inst_list)
-        stmt_list = render.run()
+        inst_list = []
+        for inst in self._inst_list:
+            ret = inst.to_ast()
+            if isinstance(ret, Iterable):
+                inst_list.extend(ret)
+            else:
+                inst_list.append(ret)
 
-        _func_def.body[0].body = stmt_list + [ast.parse(_ret).body[0]]
-
-        # RENDER_LOG.debug(f'rendered model\n{ast.unparse(_func_def)}')
+        _func_def.body[0].body = inst_list + [ast.parse(_ret).body[0]]
+        _func_def = ast.fix_missing_locations(_func_def)
         return _func_def
         
     def fn(self):
@@ -139,7 +58,7 @@ class TFunction(object):
     def get_full_code(self, param_file="param.th"):
         comments = '""" Module information:\n' + self._mlist_comments() + '"""\n'
         headers = f"import torch\nmlist, inputs = torch.load('{param_file}')\n"
-        main = f"\nfn_compiled = torch.compile(forward)\nprint(fn_compiled(mlist, **inputs))\n"
+        main = f"\nwith torch.no_grad():\n\tprint(forward(mlist, **inputs))\n\tfn_compiled = torch.compile(forward)\n\tprint(fn_compiled(mlist, **inputs))\n"
         return comments + headers + ast.unparse(self._fn_ast()) + main
     
     def get_inst_list(self):
@@ -163,7 +82,7 @@ class TFunction(object):
         for m in self._model.mlist:
             if m.__class__.__name__ == 'ConstFn':
                 val = m()
-                new_mlist.append(ConstFn(val))
+                new_mlist.append(TConstFn(val))
             else:
                 new_mlist.append(m)
         return new_mlist
@@ -171,15 +90,50 @@ class TFunction(object):
     def __getitem__(self, idx):
         return self._instructions[idx]
 
-class Render(object):
-    def __init__(self, model, instructions):
-        self._defs = []
-        self._code = []
+class Instruction(object):
+    def inputs(self):
+        raise NotImplementedError()
+
+    def outputs(self):
+        raise NotImplementedError()
+    
+    def to_ast(self):
+        raise NotImplementedError()
+
+
+class Variable(object):
+    def __init__(self, name, idx=None, suffix=None):
+        self._name = name
+        self._idx = idx
+        self._suffix = suffix
+    
+    def __str__(self):
+        ret = self._name
+        if self._idx is not None:
+            ret += f"[{','.join(self._idx)}]"
+        if self._suffix is not None:
+            ret += self._suffix
+        return ret
+    
+    def name(self):
+        return self._name
+
+class CoreInstruction(Instruction):
+    def __init__(self, model, inst, inps, outs, op):
+        super().__init__()
         self._model = model
-        self._instructions = instructions
-        
+        self._inst = inst
+        self._inps = [Variable(var) if isinstance(var, str) else var for var in inps]
+        self._outs = [Variable(var) if isinstance(var, str) else var for var in outs]
+        self._op = op
+
         self._support_op = [method[len("render"):] for method in dir(self) if method.startswith("render")]
-        self._ast = None
+    
+    def inputs(self):
+        return set([var.name() for var in self._inps])
+    
+    def outputs(self):
+        return set([var.name() for var in self._outs])
 
     def _get_render_fn(self, op):
         for support_op in self._support_op:
@@ -188,68 +142,23 @@ class Render(object):
                 return getattr(self, "render"+support_op)
         return None
 
-    def run(self):
-        self._code.clear()
-        model = self._model
-        RENDER_LOG.debug(f"start rendering, inputs:{model.ir.input_var()}")
-        stmt_idx = 0
-        while stmt_idx < len(self._instructions):
-            minst = self._instructions[stmt_idx]
-            guard = minst.get_guard()
-            if guard is not None and minst is not guard.get_first_inst():
-                continue
-            if guard is None:
-                ret = self._render_single_inst(minst)
-                self._code.extend(ast.parse(ret).body) 
-                stmt_idx += 1
-            else:
-                cond = guard.get()
-                if_stmt = f"if {cond}:\n\tpass"
-                if_stmt = ast.parse(if_stmt).body[0]
-                body = []
-                
-                while stmt_idx < len(self._instructions) and \
-                    self._instructions[stmt_idx].get_guard() is guard:
-                        inst = self._render_single_inst(self._instructions[stmt_idx])
-                        body.extend(ast.parse(inst).body)
-                        stmt_idx += 1
-                
-                if_stmt.body = body
-                self._code.append(if_stmt)
-        return self._code
+    def __str__(self):
+        render_fn = self._get_render_fn(self._op)
+        assert render_fn is not None
+        return render_fn(self._inst, self._inps, self._outs, self._op)
     
-    def _render_single_inst(self, minst):
-        inst, inps, outs, op = minst.get()
-        render_fn = self._get_render_fn(op)
-        dissolve = minst.get_dissolve()
-        if render_fn is None:
-            RENDER_LOG.warning(f"Unsupported Op {op}")
-        elif dissolve is None:
-            return render_fn(inst, inps, outs, op)
-        else:
-            assert len(outs) == 1
-            init_stmt = f"{outs[0]} = {dissolve.get_init_expr()}"
-            for_stmt = dissolve.get_loop()
-            idx = dissolve.get_index_str()
-            new_inps = [inp + idx for inp in inps]
-            new_out = outs[0] + idx 
-            body = render_fn(inst,  new_inps, [new_out], op)    
-            inner_guard = minst.get_inner_guard()
-            if inner_guard is None:
-                return f"{init_stmt}\n{for_stmt}\n\t{body}"
-            else:
-                cond = inner_guard.get()
-                return f"{init_stmt}\n{for_stmt}\n\tif {cond}:\n\t\t{body}"
+    def to_ast(self):
+        return ast.parse(str(self)).body[0]
 
     @staticmethod
     def _one_one_op(inps, outs, torch_fn):
         assert len(outs) == 1 and len(inps) == 1
-        return f"{outs[0]}={torch_fn}({','.join(inps)})"
+        return f"{outs[0]}={torch_fn}({','.join(map(str, inps))})"
 
     @staticmethod
     def _many_one_op(inps, outs, torch_fn):
         assert len(outs) == 1
-        return f"{outs[0]}={torch_fn}({','.join(inps)})"
+        return f"{outs[0]}={torch_fn}({','.join(map(str, inps))})"
 
     def _index_module(self, torch_module):
         for i, l in enumerate(self._model.mlist):
@@ -260,8 +169,8 @@ class Render(object):
     def _index_module_and_call(self, inst, inps, outs, op):
         assert len(inps) == 1
         module_id = self._index_module(inst)
-        return f"{outs[0]}=mlist[{module_id}]({','.join(inps)})"
-
+        return f"{outs[0]}=mlist[{module_id}]({','.join(map(str, inps))})"
+    
     def renderConstant(self, inst, inps, outs, op):
         module = self._index_module(inst)
         return f"{outs[0]} = mlist[{module}]()"
@@ -271,7 +180,7 @@ class Render(object):
    
     def renderAdd(self, inst, inps, outs, op):
         assert len(outs) == 1
-        return f"{outs[0]}=torch.add({','.join(inps)})"
+        return self._many_one_op(inps, outs, 'torch.add')
 
     def renderGELU(self, inst, inps, outs, op):
         return self._one_one_op(inps, outs, "torch.nn.functional.gelu")
@@ -282,7 +191,7 @@ class Render(object):
     def renderPReLU(self, inst, inps, outs, op):
         assert len(inps) == 1
         module_id = self._index_module(inst)
-        return f"{outs[0]}=mlist[{module_id}]({','.join(inps)})"
+        return f"{outs[0]}=mlist[{module_id}]({','.join(map(str, inps))})"
 
     def renderSigmoid(self, inst, inps, outs, op):
         return self._one_one_op(inps, outs, "torch.sigmoid")
@@ -511,3 +420,113 @@ class Render(object):
 
     def renderCast(self, inst, inps, outs, op):
         return f"{outs[0]} = {inps[0]}.to(dtype={op.extra_attrs['to'].torch()})"
+
+class BinaryCompExpr(object):
+    def __init__(self, a:Variable, b:Variable, op:str):
+        self._a = a
+        self._b = b
+        self._op = op
+    
+    def __str__(self):
+        return f"{self._a} {self._op} {self._b}"
+    
+    def to_ast(self):
+        return ast.parse(str(self), mode='eval').body
+
+    def inputs(self):
+        return set(self._a.name(), self._b.name())
+
+class IfInstruction(Instruction):
+    def __init__(self, cond:BinaryCompExpr, then:List[Instruction]=[], els:List[Instruction]=[]):
+        super().__init__()
+        self._cond = cond
+        self._then = then
+        self._els = els
+
+    def to_ast(self):
+        then = [inst.to_ast() for inst in self._then]
+        els = [inst.to_ast() for inst in self._els]
+        cond = self._cond.to_ast()
+        if_stmt = ast.If(cond, then, els)
+        if_stmt = ast.fix_missing_locations(if_stmt)
+        # print(ast.unparse(if_stmt))
+        return if_stmt
+    
+    def outputs(self):
+        return set([inst.outputs() for inst in self._then + self._els])
+
+    def inputs(self):
+        return set([inst.inputs() for inst in self._then + self._els] + self._cond.inputs())
+
+class SimpleAssignInstruction(Instruction):
+    def __init__(self, var:Variable, rhs:Union[str, Variable], clone=True):
+        super().__init__()
+        self._var = var
+        self._rhs = rhs
+        self._clone = clone
+    
+    def inputs(self):
+        return set() if isinstance(self._rhs, str) else set([self._rhs.name()])
+
+    def outputs(self):
+        return set([self._var.name()])
+    
+    def to_ast(self):
+        rhs = self._rhs
+        if isinstance(rhs, Variable) and self._clone:
+            rhs = f"({rhs}).clone()"
+        return ast.parse(f"{self._var}={rhs}").body[0]
+
+class InitInstruction(Instruction):
+    def __init__(self, out, shape, dtype, device):
+        self._out = out
+        self._shape = shape
+        self._dtype = dtype
+        self._device = device
+
+    def outputs(self):
+        return set([Variable(self._out)])
+
+    def get_init_expr(self):
+        return f"{self._out} = torch.empty({self._shape}, dtype={self._dtype}, device='{self._device}')"
+    
+    def to_ast(self):
+        init_ast = ast.parse(self.get_init_expr()).body[0]
+        return init_ast
+
+class ElementwiseLoop(Instruction):
+    def __init__(self, inst, dim, shape):
+        super().__init__()
+        self._dim = dim
+        self._shape = shape
+        self._ndim = len(shape)
+
+        self._out = inst._outs[0].name()
+
+        self._idx = 'i'
+        idx = self.get_index_list()
+
+        assert isinstance(inst, CoreInstruction)
+        new_out = Variable(str(inst._outs[0]), idx)
+        new_inps = [Variable(str(inp), idx) for inp in inst._inps]
+        self._inst = CoreInstruction(inst._model, inst._inst, new_inps, [new_out], inst._op)
+    
+    def inputs(self):
+        return self.inputs()
+    
+    def outputs(self):
+        return self.outputs()
+    
+    def get_index_list(self):
+        ret = [':'] * self._ndim
+        ret[self._dim] = self._idx
+        return ret
+    
+    def get_loop(self):
+        return f"for {self._idx} in range(0, {self._shape[self._dim]}):"
+
+    def to_ast(self):
+        loop_ast = ast.parse(self.get_loop() + '\n\tpass').body[0]
+        body_ast = self._inst.to_ast()
+        loop_ast.body[0] = body_ast
+        return loop_ast

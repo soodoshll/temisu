@@ -12,7 +12,7 @@ import numpy as np
 
 from nnsmith.narrow_spec import auto_opset
 from nnsmith.abstract.op import *
-from .render import Render, TFunction
+from .ir import TFunction
 from .logging import *
 from .mutator import Mutator
 
@@ -40,7 +40,8 @@ opset = op_filter(
              "core.TrilinearInterp", #"core.Ceil", "core.Floor", "core.PReLU", "core.Clip", "core.LeakyReLU",
              #"core.ReduceMax", "core.ReduceMin", "core.Abs", "core.Pad", "core.Atan", "core.ReduceMean", "core.Div"
              "core.Concat1", "core.Concat2", "core.Concat3", "core.Concat4", "core.Concat5", "core.Concat6",
-             "core.Floor", "core.Round", "core.Ceil"
+             "core.Floor", "core.Round", "core.Ceil",
+             "core.ExpandLast1", "core.ExpandLast2", "core.ExpandLast3", "core.ExpandLast4",
             ]
         )
 
@@ -68,8 +69,6 @@ class Inconsistency(BugReport):
 
     def __str__(self):
         ret = self.annotation
-        # ret += "\nCode:\n"
-        # ret += self.code
         if self.target is not None:
             ret += f"\nExpected: {self.target}"
         if self.output is not None:
@@ -92,8 +91,8 @@ def _no_nan_or_inf(target):
     return not np.any(np.isinf(target)) and not np.any(np.isnan(target))
 
 def _compile_and_run(prog, input_tensors, mode='default', backend='inductor'):
-    compiled = torch.compile(prog, backend=backend, mode=mode)
     with torch.no_grad():
+        compiled = torch.compile(prog, backend=backend, mode=mode)
         output = compiled(mlist, **input_tensors)
     if not isinstance(output, tuple):
         output = (output, )
@@ -141,19 +140,16 @@ while True:
     tfunc = TFunction(th_model)
     th_model.to(device)
     mlist = th_model.mlist
-    # backend = relax_dynamo() 
     backend = "inductor"
 
     try:
-        # mutation_name = "origin"
-        # output = _compile_and_run(func, input_tensors) 
-        # verify_results(target, output, tfunc)
         for mutation_name, tfunc in Mutator(tfunc, input_tensors):
             TEMISU_LOG.info(f"mutate: {mutation_name}")
             if tfunc is None:
                 continue
             func = tfunc.fn()
             _save_report(tfunc=tfunc)
+            input_tensors = {k:v.clone() for k,v in input_tensors.items()}
             output = _compile_and_run(func, input_tensors, backend=backend)
             verify_results(target, output, tfunc, 1e-2, 1e-4)
             TEMISU_LOG.info(f"pass: {mutation_name}")
