@@ -287,11 +287,18 @@ class Mutator(object):
         rets = set()
         defined = set()
         for inst in inst_list:
+<<<<<<< HEAD
             # args.update([inp for inp in inst.inputs() if not inp in defined])
             args.update(inst.inputs())
             rets.update(inst.outputs())
             # if isinstance(inst, (CoreInstruction, InitInstruction)):
                 # defined.update(inst.outputs())
+=======
+            args.update([inp for inp in inst.inputs() if not inp in defined])
+            rets.update(inst.outputs())
+            if isinstance(inst, (CoreInstruction, InitInstruction)):
+                defined.update(inst.outputs())
+>>>>>>> 9dbaecbcb767694068c65ec799e6efcdd220e915
         args = [arg for arg in args if arg in snapshot and random.choice([True,False])]
         
         args, rets = list(args), list(rets)
