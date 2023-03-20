@@ -42,6 +42,7 @@ opset = op_filter(
              "core.Concat1", "core.Concat2", "core.Concat3", "core.Concat4", "core.Concat5", "core.Concat6",
              "core.Floor", "core.Round", "core.Ceil",
              "core.ExpandLast1", "core.ExpandLast2", "core.ExpandLast3", "core.ExpandLast4",
+             "core.Pad"
             ]
         )
 
@@ -123,7 +124,7 @@ while True:
         max_elem_per_tensor=65536,
         timeout_ms=10000,
         max_nodes=10,
-        dtype_choices=['bool', 'f32', 'int32', 'int64', 'f64', ],
+        dtype_choices=['bool', 'f32', 'int32', 'int64', 'f64',],
     )
     ir = gen.make_concrete()
     model = ModelType.from_gir(ir)

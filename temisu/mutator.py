@@ -9,6 +9,7 @@ from nnsmith.abstract.op import *
 from .ir import *
 
 ScalarizeMethod = Enum('ScalarizeMethod', ['ELEMENT', 'SHAPE', 'MAX', 'MIN', 'SUM', 'MEAN'])
+LoopStyle = Enum("LoopStyle", ['FOR', 'UNROLL', 'LIST_COMPREHENSION'])
 
 def _scalarize(k:str, v:torch.Tensor):
     if len(v.shape) == 0:
@@ -81,8 +82,16 @@ class Mutator(object):
                 break
             module = ast.Module([stmt.to_ast()], [], lineno=0, col_offset=0)
             ast.fix_missing_locations(module)
+
+            # work around list comprehension
+            # global_dict = globals().copy()
+            # global_dict.update(local_dict)
+            
+            local_dict.update(globals())
+
             with torch.no_grad():
-                exec(compile(module, "<string>", "exec"), globals(), local_dict)
+                exec(compile(module, ast.unparse(module), "exec"), local_dict)
+
         return {k : v for k, v in local_dict.items() if isinstance(v, torch.Tensor)}
 
     def insert_tcb(self):
@@ -129,10 +138,38 @@ class Mutator(object):
 
         dim = random.randint(0, len(out.shape) - 1)
         init = InitInstruction(inst._outs[0].name(), out.shape, out.dtype, out.device)
-        loop = ElementwiseLoop(inst, dim, out.shape)
 
-        self._inst_list[chosen] = loop
-        self._inst_list.insert(chosen, init)
+        loop_styles = list(LoopStyle)
+        if out.shape[dim] > 10:
+            loop_styles.remove(LoopStyle.UNROLL)
+        loop_style = random.choice(list(LoopStyle))
+        # loop_style = LoopStyle.LIST_COMPREHENSION
+
+        if loop_style == LoopStyle.FOR:
+            loop = ElementwiseLoop(inst, dim, out.shape)
+            self._inst_list[chosen] = loop
+            self._inst_list.insert(chosen, init)
+        elif loop_style == LoopStyle.UNROLL:
+            unroll_inst = []
+            inst = self._inst_list[chosen]
+            inps_var = inst._inps
+            out_var = inst._outs[0]
+            for i in range(out.shape[dim]):
+                idx = [":"] * len(out.shape) 
+                idx[dim] = str(i)
+                new_out = Variable(out_var.name(), idx=idx) 
+                new_inps = [Variable(v.name(), idx=idx) for v in inps_var]
+                new_inst = CoreInstruction(self._model, inst._inst, new_inps, [new_out], inst._op)
+                unroll_inst.append(new_inst)
+            del self._inst_list[chosen]
+            while len(unroll_inst) > 0:
+                self._inst_list.insert(chosen, unroll_inst.pop())
+            self._inst_list.insert(chosen, init)
+        elif loop_style == LoopStyle.LIST_COMPREHENSION:
+            loop = ElementwiseComprehension(inst, dim, out.shape) 
+            self._inst_list[chosen] = loop
+            self._inst_list.insert(chosen, init)
+
         return self._tfunc
 
     def origin(self):
@@ -250,10 +287,11 @@ class Mutator(object):
         rets = set()
         defined = set()
         for inst in inst_list:
-            args.update([inp for inp in inst.inputs() if not inp in defined])
+            # args.update([inp for inp in inst.inputs() if not inp in defined])
+            args.update(inst.inputs())
             rets.update(inst.outputs())
-            if isinstance(inst, (CoreInstruction, InitInstruction)):
-                defined.update(inst.outputs())
+            # if isinstance(inst, (CoreInstruction, InitInstruction)):
+                # defined.update(inst.outputs())
         args = [arg for arg in args if arg in snapshot and random.choice([True,False])]
         
         args, rets = list(args), list(rets)

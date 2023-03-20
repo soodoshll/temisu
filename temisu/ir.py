@@ -576,3 +576,36 @@ class CallSubFunction(Instruction):
     def to_ast(self):
         inst = f"{','.join(map(str, self._rets))} = {self._name}({','.join(map(str, self._args))})"
         return ast.parse(inst).body[0]
+
+class ElementwiseComprehension(Instruction):
+    def __init__(self, inst, dim, shape):
+        super().__init__()
+        self._dim = dim
+        self._shape = shape
+        self._ndim = len(shape)
+
+        self._out = inst._outs[0].name()
+
+        self._idx = 'i'
+        idx = self.get_index_list()
+
+        assert isinstance(inst, CoreInstruction)
+        new_out = Variable(str(inst._outs[0]), idx)
+        new_inps = [Variable(str(inp), idx) for inp in inst._inps]
+        self._inst = CoreInstruction(inst._model, inst._inst, new_inps, [new_out], inst._op)
+    
+    def inputs(self):
+        return self._inst.inputs()
+
+    def outputs(self):
+        return self._inst.outputs()
+    
+    def to_ast(self):
+        inst_str = ast.unparse(self._inst.to_ast().value)
+        lc_inst = f"{self._out} = torch.stack([{inst_str} for i in range({self._shape[self._dim]})], dim={self._dim})"
+        return ast.parse(lc_inst).body[0]
+
+    def get_index_list(self):
+        ret = [':'] * self._ndim
+        ret[self._dim] = self._idx
+        return ret

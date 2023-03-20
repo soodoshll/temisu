@@ -14,6 +14,16 @@ Add this directory to `PATH`. Then run
 python -m temisu.fuzz
 ```
 
+# Features
+
+Currently support testing of (dynamic) features:
+
+ - if statement
+ - for loop
+ - list comprehension
+ - nested function
+ - inplace tensor mutation
+
 # Transformations
 
 Transformations that guarantee EMI (equivalence modulo inputs)
