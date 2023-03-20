@@ -292,7 +292,6 @@ class Mutator(object):
             rets.update(inst.outputs())
             # if isinstance(inst, (CoreInstruction, InitInstruction)):
                 # defined.update(inst.outputs())
-
         args = [arg for arg in args if arg in snapshot and random.choice([True,False])]
         
         args, rets = list(args), list(rets)
