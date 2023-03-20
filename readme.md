@@ -16,7 +16,7 @@ python -m temisu.fuzz
 
 # Features
 
-Currently support testing of (dynamic) features:
+Currently supported (dynamic) features:
 
  - if statement
  - for loop
