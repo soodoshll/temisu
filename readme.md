@@ -1,4 +1,4 @@
-A fuzzing tool built upon NNSmith to find bugs in the new compilers of PyTorch, covering more dynamic features to be tested (control flow, loops, tensor manipulation, etc). Already found 10+ bugs of PyTorch compiler (see https://github.com/pytorch/pytorch/issues/created_by/soodoshll and https://github.com/openai/triton/issues/created_by/soodoshll)
+A fuzzing tool built upon NNSmith to find bugs in the new compilers of PyTorch, covering more dynamic features to be tested (control flow, loops, tensor manipulation, etc). Already found ~20 bugs of PyTorch compiler (see https://github.com/pytorch/pytorch/issues/created_by/soodoshll and https://github.com/openai/triton/issues/created_by/soodoshll)
 
 
 # Dependencies
